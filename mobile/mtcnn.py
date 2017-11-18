@@ -103,7 +103,7 @@ def generate_bbox(face_cls, bbox_reg, scale, threshold):
     return bbox
 
 
-def non_max_suppression(boxes, overlap_threshold, index=None):
+def non_max_suppression(bboxes, overlap_threshold, index=None):
     """
     Apply non-maximum suppression to bounding box candidates. This method
     iterates over each bounding box and computes the intersection over
@@ -119,23 +119,23 @@ def non_max_suppression(boxes, overlap_threshold, index=None):
     you will likely want to prioritize bounding boxes with the highest
     classification score.
 
-    :param boxes: bounding box array [?, x1, y1, x2, y2]
+    :param bboxes: bounding box array [?, x1, y1, x2, y2]
     :param overlap_threshold: intersection over union threshold
     :param index: (optional) index priority
     :return: filtered bounding box array
     """
     # if there are no boxes, return an empty list
-    if len(boxes) == 0:
+    if len(bboxes) == 0:
         return np.empty((0, 9))
 
     # initialize the list of picked indexes
     pick = []
 
     # grab the coordinates of the bounding boxes
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
+    x1 = bboxes[:, 0]
+    y1 = bboxes[:, 1]
+    x2 = bboxes[:, 2]
+    y2 = bboxes[:, 3]
 
     # compute the area of the bounding boxes and sort the bounding
     # boxes by the bottom-right y-coordinate of the bounding box
@@ -176,7 +176,35 @@ def non_max_suppression(boxes, overlap_threshold, index=None):
 
     # return only the bounding boxes that were picked using the
     # integer data type
-    return boxes[pick]
+    return bboxes[pick]
+
+
+def square_bbox(bbox):
+    """
+    Convert rectangular bounding boxes to squares.
+
+    :param bbox: array of rectangular bounding boxes
+    :return: array of square bounding boxes
+    """
+
+    # compute height of bounding boxes
+    h = bbox[:, 3] - bbox[:, 1]
+
+    # compute width of bounding boxes
+    w = bbox[:, 2] - bbox[:, 0]
+
+    # compute maximum dimensions
+    l = np.maximum(w, h)
+
+    # update top left coordinates.
+    x1 = bbox[:, 0] + w * 0.5 - l * 0.5
+    y1 = bbox[:, 1] + h * 0.5 - l * 0.5
+
+    # add maximum dimension to top left coordinates.
+    x2, y2 = np.hsplit(bbox[:, 0:2] + np.transpose(np.tile(l, (2, 1))), 2)
+
+    # return updated bounding box
+    return np.hstack([x1.reshape((-1, 1)), y1.reshape((-1, 1)), x2, y2, bbox[:, 4].reshape((-1, 1))])
 
 
 def first_stage(image, pnet):
@@ -214,13 +242,52 @@ def first_stage(image, pnet):
         # outputs from proposal network.
         bbox_proposals = generate_bbox(face_cls, bbox_reg, scale, 0.6)
 
-        # Apply non-maximum suppression to consolidate bounding box proposals.
+        # Apply non-maximum suppression to consolidate bounding box proposals
+        # within scale.
         bboxes = non_max_suppression(bbox_proposals, 0.5, bbox_proposals[:, 4])
 
         # Store bounding boxes from this scale.
         all_bboxes = np.append(all_bboxes, bboxes, axis=0)
 
+    # Process bounding box candidates from all scales.
+    if len(all_bboxes) > 0:
+
+        # Apply non-maximum suppression to bounding boxes generated at all scales.
+        all_bboxes = non_max_suppression(all_bboxes, 0.7, index=all_bboxes[:, 4])
+
+        # Unpack bounding box parameters
+        x1, y1, x2, y2, score, dx1, dy1, dx2, dy2 = np.hsplit(all_bboxes, 9)
+
+        reg_width = x2 - x1
+        reg_height = y2 - y1
+
+        # Apply bounding box regression results to coordinates.
+        xx1 = x1 + dx1 * reg_width
+        yy1 = y1 + dy1 * reg_height
+        xx2 = x2 + dx2 * reg_width
+        yy2 = y2 + dy2 * reg_height
+
+        # Update bounding box array to include updated coordinates.
+        all_bboxes = np.hstack([xx1, yy1, xx2, yy2, score])
+
+        # Convert bounding boxes to squares.
+        all_bboxes = square_bbox(all_bboxes)
+
     return all_bboxes
+
+
+def compare(bbox_a, bbox_b):
+
+    return np.all(
+        [
+            np.all(bbox_a[:, 0] == bbox_b[:, 1]),
+            np.all(bbox_a[:, 1] == bbox_b[:, 0]),
+            np.all(bbox_a[:, 2] == bbox_b[:, 3]),
+            np.all(bbox_a[:, 3] == bbox_b[:, 2]),
+            np.all(bbox_a[:, 4] == bbox_b[:, 4]),
+        ]
+    )
+
 
 if __name__ == "__main__":
 
@@ -239,6 +306,7 @@ if __name__ == "__main__":
 
         box_new = first_stage(image.copy(), pnet)
 
+        print(compare(box_org, box_new))
 
 
 
